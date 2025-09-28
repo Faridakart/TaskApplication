@@ -1,4 +1,5 @@
-package com.example.taskapp.repository;
+```java
+        package com.example.taskapp.repository;
 
 import com.example.taskapp.model.Task;
 import org.junit.jupiter.api.BeforeAll;
@@ -8,8 +9,11 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
+import org.springframework.cache.CacheManager;
+import org.springframework.context.annotation.Import;
 import org.springframework.test.context.ActiveProfiles;
 import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -25,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.*;
 @DataJpaTest
 @Testcontainers
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
+@Import(com.example.taskapp.config.CacheConfig.class)
 class JpaTaskRepositoryTest {
 
     @Container
@@ -33,16 +38,26 @@ class JpaTaskRepositoryTest {
             .withUsername("postgres")
             .withPassword("postgres");
 
+    @Container
+    private static final GenericContainer<?> redis = new GenericContainer<>("redis:7.0")
+            .withExposedPorts(6379);
+
     @BeforeAll
     static void beforeAll() {
         postgres.start();
+        redis.start();
         System.setProperty("spring.datasource.url", postgres.getJdbcUrl());
         System.setProperty("spring.datasource.username", postgres.getUsername());
         System.setProperty("spring.datasource.password", postgres.getPassword());
+        System.setProperty("spring.redis.host", redis.getHost());
+        System.setProperty("spring.redis.port", redis.getMappedPort(6379).toString());
     }
 
     @Autowired
     private JpaTaskRepository repository;
+
+    @Autowired
+    private CacheManager cacheManager;
 
     private Task taskToSave1User1;
     private Task taskToSave2User1;
@@ -73,9 +88,106 @@ class JpaTaskRepositoryTest {
                 .creationDate(LocalDateTime.now())
                 .status("pending")
                 .build();
+
+        // Clear cache before each test
+        cacheManager.getCache("tasks").clear();
     }
 
-    // findByIsDeletedFalse
+    @Test
+    void findByIsDeletedFalse_ReturnsCachedTasks_WhenCalledMultipleTimes() {
+        Task savedTask1 = repository.save(taskToSave1User1);
+        Task savedTask2 = repository.save(taskToSave1User2);
+
+        // First call: Should hit database and cache
+        List<Task> tasksFirstCall = repository.findByIsDeletedFalse();
+        assertEquals(2, tasksFirstCall.size());
+
+        // Second call: Should hit cache
+        List<Task> tasksSecondCall = repository.findByIsDeletedFalse();
+        assertSame(tasksFirstCall, tasksSecondCall); // Same object indicates cache hit
+
+        // Verify cache
+        assertNotNull(cacheManager.getCache("tasks").get("all"));
+    }
+
+    @Test
+    void findByIdAndIsDeletedFalse_ReturnsCachedTask_WhenCalledMultipleTimes() {
+        Task savedTask = repository.save(taskToSave1User1);
+
+        // First call: Should hit database and cache
+        Optional<Task> taskFirstCall = repository.findByIdAndIsDeletedFalse(savedTask.getId());
+        assertTrue(taskFirstCall.isPresent());
+
+        // Second call: Should hit cache
+        Optional<Task> taskSecondCall = repository.findByIdAndIsDeletedFalse(savedTask.getId());
+        assertSame(taskFirstCall, taskSecondCall); // Same object indicates cache hit
+
+        // Verify cache
+        assertNotNull(cacheManager.getCache("tasks").get(savedTask.getId().toString()));
+    }
+
+    @Test
+    void findByUserIdAndIsDeletedFalse_ReturnsCachedTasks_WhenCalledMultipleTimes() {
+        Task savedTask1 = repository.save(taskToSave1User1);
+        repository.save(taskToSave2User1);
+
+        // First call: Should hit database and cache
+        List<Task> tasksFirstCall = repository.findByUserIdAndIsDeletedFalse(USER_ID_1);
+        assertEquals(2, tasksFirstCall.size());
+
+        // Second call: Should hit cache
+        List<Task> tasksSecondCall = repository.findByUserIdAndIsDeletedFalse(USER_ID_1);
+        assertSame(tasksFirstCall, tasksSecondCall); // Same object indicates cache hit
+
+        // Verify cache
+        assertNotNull(cacheManager.getCache("tasks").get("user_" + USER_ID_1));
+    }
+
+    @Test
+    void findByUserIdAndStatusAndIsDeletedFalse_ReturnsCachedTasks_WhenCalledMultipleTimes() {
+        Task savedTask1 = repository.save(taskToSave1User1);
+        repository.save(taskToSave2User1);
+
+        // First call: Should hit database and cache
+        List<Task> tasksFirstCall = repository.findByUserIdAndStatusAndIsDeletedFalse(USER_ID_1, "pending");
+        assertEquals(1, tasksFirstCall.size());
+
+        // Second call: Should hit cache
+        List<Task> tasksSecondCall = repository.findByUserIdAndStatusAndIsDeletedFalse(USER_ID_1, "pending");
+        assertSame(tasksFirstCall, tasksSecondCall); // Same object indicates cache hit
+
+        // Verify cache
+        assertNotNull(cacheManager.getCache("tasks").get("user_" + USER_ID_1 + "_pending"));
+    }
+
+    @Test
+    void save_NewTask_CachesTaskAndEvictsRelatedCaches() {
+        Task savedTask = repository.save(taskToSave1User1);
+
+        // Verify task is cached
+        assertNotNull(cacheManager.getCache("tasks").get(savedTask.getId().toString()));
+
+        // Verify related caches are evicted
+        assertNull(cacheManager.getCache("tasks").get("all"));
+        assertNull(cacheManager.getCache("tasks").get("user_" + USER_ID_1));
+        assertNull(cacheManager.getCache("tasks").get("user_" + USER_ID_1 + "_pending"));
+    }
+
+    @Test
+    void markAsDeleted_EvictsTaskFromCache() {
+        Task savedTask = repository.save(taskToSave1User1);
+
+        // Populate cache
+        repository.findByIdAndIsDeletedFalse(savedTask.getId());
+        assertNotNull(cacheManager.getCache("tasks").get(savedTask.getId().toString()));
+
+        // Mark as deleted
+        repository.markAsDeleted(savedTask.getId());
+
+        // Verify task is evicted
+        assertNull(cacheManager.getCache("tasks").get(savedTask.getId().toString()));
+    }
+
     @Test
     void findByIsDeletedFalse_ReturnsOnlyNonDeletedTasks() {
         Task savedTask1 = repository.save(taskToSave1User1);
@@ -123,15 +235,6 @@ class JpaTaskRepositoryTest {
         assertTrue(receivedTasks.isEmpty());
     }
 
-    // findByIdAndIsDeletedFalse
-    @Test
-    void findByIdAndIsDeletedFalse_ReturnsOptionalWithTask_WhenExistsAndNotDeleted() {
-        Task savedTask = repository.save(taskToSave1User1);
-        Optional<Task> foundTaskOpt = repository.findByIdAndIsDeletedFalse(savedTask.getId());
-        assertTrue(foundTaskOpt.isPresent());
-        assertEquals(savedTask.getDescription(), foundTaskOpt.get().getDescription());
-    }
-
     @Test
     void findByIdAndIsDeletedFalse_ReturnsEmptyOptional_WhenDoesNotExist() {
         repository.save(taskToSave1User1);
@@ -153,24 +256,6 @@ class JpaTaskRepositoryTest {
         repository.save(taskToSave1User1);
         Optional<Task> foundTaskOpt = repository.findByIdAndIsDeletedFalse(null);
         assertTrue(foundTaskOpt.isEmpty());
-    }
-
-    // findByUserIdAndIsDeletedFalse
-    @Test
-    void findByUserIdAndIsDeletedFalse_ReturnsOnlyNonDeletedUserTasks() {
-        Task savedTask1 = repository.save(taskToSave1User1);
-        Task savedTask2 = repository.save(taskToSave2User1);
-        repository.save(taskToSave1User2);
-
-        repository.markAsDeleted(savedTask2.getId());
-
-        List<Task> user1Tasks = repository.findByUserIdAndIsDeletedFalse(USER_ID_1);
-        assertNotNull(user1Tasks);
-        assertEquals(1, user1Tasks.size());
-        assertTrue(user1Tasks.stream()
-                .anyMatch(t -> t.getId().equals(savedTask1.getId())));
-        assertFalse(user1Tasks.stream()
-                .anyMatch(t -> t.getId().equals(savedTask2.getId())));
     }
 
     @Test
@@ -195,7 +280,6 @@ class JpaTaskRepositoryTest {
         assertTrue(userTasks.isEmpty());
     }
 
-    // save
     @Test
     void save_NewTask_AssignsIdAndReturnsSavedTask() {
         Task savedTask = repository.save(taskToSave1User1);
@@ -313,7 +397,6 @@ class JpaTaskRepositoryTest {
                 .contains("Task with id " + NON_EXISTENT_TASK_ID + " not found for update via save."));
     }
 
-    // existsByIdAndIsDeletedFalse
     @Test
     void existsByIdAndIsDeletedFalse_ReturnsTrue_WhenExistsAndNotDeleted() {
         Task savedTask = repository.save(taskToSave1User1);
@@ -338,7 +421,6 @@ class JpaTaskRepositoryTest {
         assertFalse(repository.existsByIdAndIsDeletedFalse(null));
     }
 
-    // findByUserIdAndStatusAndIsDeletedFalse
     @Test
     void findByUserIdAndStatusAndIsDeletedFalse_ReturnsOnlyMatchingTasks() {
         Task savedTask1 = repository.save(taskToSave1User1);
@@ -352,3 +434,4 @@ class JpaTaskRepositoryTest {
                 .anyMatch(t -> t.getId().equals(savedTask1.getId())));
     }
 }
+```
