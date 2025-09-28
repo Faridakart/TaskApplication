@@ -3,11 +3,13 @@ package com.example.taskapp.service;
 import com.example.taskapp.model.Notification;
 import com.example.taskapp.repository.NotificationRepository;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
 
 @Service
+@Profile("postgres")
 public class NotificationService {
     private final NotificationRepository notificationRepository;
 
@@ -25,7 +27,19 @@ public class NotificationService {
     }
 
     public Notification createNotification(Notification notification) {
+        if (notification == null || notification.getUserId() == null || notification.getMessage() == null) {
+            throw new IllegalArgumentException("Notification, userId, and message cannot be null");
+        }
         notification.setStatus("pending");
         return notificationRepository.save(notification);
+    }
+
+    public Notification createNotification(Long userId, String message) {
+        Notification notification = Notification.builder()
+                .userId(userId)
+                .message(message)
+                .status("pending")
+                .build();
+        return createNotification(notification);
     }
 }

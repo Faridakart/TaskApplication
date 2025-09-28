@@ -1,34 +1,40 @@
 package com.example.taskapp.service;
 
+import com.example.taskapp.config.RabbitMQConfig;
 import com.example.taskapp.model.Task;
 import com.example.taskapp.repository.TaskRepository;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Service;
 
-import java.time.LocalDateTime;
-import java.util.List;
-
 @Service
+@Profile("postgres")
 public class TaskService {
+
     private final TaskRepository taskRepository;
+    private final RabbitTemplate rabbitTemplate;
 
     @Autowired
-    public TaskService(TaskRepository taskRepository) {
+    public TaskService(TaskRepository taskRepository, RabbitTemplate rabbitTemplate) {
         this.taskRepository = taskRepository;
-    }
-
-    public List<Task> getAllTasks(Long userId) {
-        return taskRepository.findAllByUserId(userId);
-    }
-
-    public List<Task> getPendingTasks(Long userId) {
-        return taskRepository.findPendingByUserId(userId);
+        this.rabbitTemplate = rabbitTemplate;
     }
 
     public Task createTask(Task task) {
-        task.setCreationDate(LocalDateTime.now());
-        task.setStatus("pending");
-        return taskRepository.save(task);
+        if (task == null) {
+            throw new IllegalArgumentException("Task cannot be null");
+        }
+        Task savedTask = taskRepository.save(task);
+        if (task.getId() == null) {
+            rabbitTemplate.convertAndSend(RabbitMQConfig.EXCHANGE_NAME, RabbitMQConfig.ROUTING_KEY, savedTask);
+        }
+        return savedTask;
+    }
+
+    public Task getTaskById(Long id) {
+        return taskRepository.findByIdAndIsDeletedFalse(id)
+                .orElseThrow(() -> new IllegalArgumentException("Task with id " + id + " not found"));
     }
 
     public void deleteTask(Long id) {
