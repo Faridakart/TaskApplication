@@ -1,6 +1,10 @@
 package com.example.taskapp.model;
 
+import jakarta.persistence.*;
+
 public class Notification {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
     private String message;
     private String status; // "pending", "read"
