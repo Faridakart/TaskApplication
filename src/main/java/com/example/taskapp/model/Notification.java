@@ -2,6 +2,7 @@ package com.example.taskapp.model;
 
 import jakarta.persistence.*;
 
+@Entity
 public class Notification {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
